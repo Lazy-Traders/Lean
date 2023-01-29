@@ -728,11 +728,14 @@ namespace QuantConnect
         /// <returns>MD5 hash of a string</returns>
         public static string ToMD5(this string str)
         {
-            var builder = new StringBuilder();
+            var builder = new StringBuilder(32);
             using (var md5Hash = MD5.Create())
             {
                 var data = md5Hash.ComputeHash(Encoding.UTF8.GetBytes(str));
-                foreach (var t in data) builder.Append(t.ToStringInvariant("x2"));
+                for (var i = 0; i < 16; i++)
+                {
+                    builder.Append(data[i].ToStringInvariant("x2"));
+                }
             }
             return builder.ToString();
         }
@@ -744,12 +747,14 @@ namespace QuantConnect
         /// <returns>Hashed string.</returns>
         public static string ToSHA256(this string data)
         {
-            var crypt = new SHA256Managed();
-            var hash = new StringBuilder();
-            var crypto = crypt.ComputeHash(Encoding.UTF8.GetBytes(data), 0, Encoding.UTF8.GetByteCount(data));
-            foreach (var theByte in crypto)
+            var hash = new StringBuilder(64);
+            using (var crypt = SHA256.Create())
             {
-                hash.Append(theByte.ToStringInvariant("x2"));
+                var crypto = crypt.ComputeHash(Encoding.UTF8.GetBytes(data));
+                for (var i = 0; i < 32; i++)
+                {
+                    hash.Append(crypto[i].ToStringInvariant("x2"));
+                }
             }
             return hash.ToString();
         }
@@ -1207,6 +1212,16 @@ namespace QuantConnect
         public static string NormalizeToStr(this decimal input)
         {
             return Normalize(input).ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// Helper method to determine the amount of decimal places associated with the given decimal
+        /// </summary>
+        /// <param name="input">The value to get the decimal count from</param>
+        /// <returns>The quantity of decimal places</returns>
+        public static int GetDecimalPlaces(this decimal input)
+        {
+            return BitConverter.GetBytes(decimal.GetBits(input)[3])[2];
         }
 
         /// <summary>
@@ -1831,23 +1846,24 @@ namespace QuantConnect
         /// </summary>
         /// <param name="resolution">The resolution to be converted</param>
         /// <returns>A TimeSpan instance that represents the resolution specified</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static TimeSpan ToTimeSpan(this Resolution resolution)
         {
             switch (resolution)
             {
                 case Resolution.Tick:
                     // ticks can be instantaneous
-                    return TimeSpan.FromTicks(0);
+                    return TimeSpan.Zero;
                 case Resolution.Second:
-                    return TimeSpan.FromSeconds(1);
+                    return Time.OneSecond;
                 case Resolution.Minute:
-                    return TimeSpan.FromMinutes(1);
+                    return Time.OneMinute;
                 case Resolution.Hour:
-                    return TimeSpan.FromHours(1);
+                    return Time.OneHour;
                 case Resolution.Daily:
-                    return TimeSpan.FromDays(1);
+                    return Time.OneDay;
                 default:
-                    throw new ArgumentOutOfRangeException("resolution");
+                    throw new ArgumentOutOfRangeException(nameof(resolution));
             }
         }
 
@@ -2092,6 +2108,7 @@ namespace QuantConnect
                 case SecurityType.Future:
                 case SecurityType.Cfd:
                 case SecurityType.Crypto:
+                case SecurityType.CryptoFuture:
                 case SecurityType.Index:
                 case SecurityType.IndexOption:
                     return true;
@@ -2326,6 +2343,8 @@ namespace QuantConnect
                     return "cfd";
                 case SecurityType.Crypto:
                     return "crypto";
+                case SecurityType.CryptoFuture:
+                    return "cryptofuture";
                 default:
                     // just in case
                     return securityType.ToLower();
@@ -2395,6 +2414,7 @@ namespace QuantConnect
             switch (order.Type)
             {
                 case OrderType.Limit:
+                case OrderType.ComboLegLimit:
                     var limitOrder = order as LimitOrder;
                     limitPrice = limitOrder.LimitPrice;
                     break;
@@ -2416,8 +2436,12 @@ namespace QuantConnect
                 case OrderType.Market:
                 case OrderType.MarketOnOpen:
                 case OrderType.MarketOnClose:
+                case OrderType.ComboMarket:
                     limitPrice = order.Price;
                     stopPrice = order.Price;
+                    break;
+                case OrderType.ComboLimit:
+                    limitPrice = order.GroupOrderManager.LimitPrice;
                     break;
                 default:
                     throw new ArgumentOutOfRangeException();
@@ -2432,7 +2456,8 @@ namespace QuantConnect
                 triggerPrice,
                 order.Time,
                 order.Tag,
-                order.Properties);
+                order.Properties,
+                order.GroupOrderManager);
 
             submitOrderRequest.SetOrderId(order.Id);
             var orderTicket = new OrderTicket(transactionManager, submitOrderRequest);
@@ -2655,7 +2680,7 @@ namespace QuantConnect
                 return pyObject.AsManagedObject(typeToConvertTo);
             }
         }
-        
+
         /// <summary>
         /// Converts a Python function to a managed function returning a Symbol
         /// </summary>
@@ -2989,9 +3014,27 @@ namespace QuantConnect
         /// <returns></returns>
         public static string RemoveFromEnd(this string s, string ending)
         {
-            if (s.EndsWith(ending))
+            if (s.EndsWith(ending, StringComparison.InvariantCulture))
             {
                 return s.Substring(0, s.Length - ending.Length);
+            }
+            else
+            {
+                return s;
+            }
+        }
+
+        /// <summary>
+        /// Returns a new string in which specified start in the current instance is removed.
+        /// </summary>
+        /// <param name="s">original string value</param>
+        /// <param name="start">the string to be removed</param>
+        /// <returns>Substring with start removed</returns>
+        public static string RemoveFromStart(this string s, string start)
+        {
+            if (!string.IsNullOrEmpty(s) && !string.IsNullOrEmpty(start) && s.StartsWith(start, StringComparison.InvariantCulture))
+            {
+                return s.Substring(start.Length);
             }
             else
             {
@@ -3120,6 +3163,10 @@ namespace QuantConnect
         /// <returns>Enumeration of lines in file</returns>
         public static IEnumerable<string> ReadLines(this IDataProvider dataProvider, string file)
         {
+            if(dataProvider == null)
+            {
+                throw new ArgumentException($"The provided '{nameof(IDataProvider)}' instance is null. Are you missing some initialization step?");
+            }
             var stream = dataProvider.Fetch(file);
             if (stream == null)
             {
@@ -3145,11 +3192,13 @@ namespace QuantConnect
         /// Scale data based on factor function
         /// </summary>
         /// <param name="data">Data to Adjust</param>
-        /// <param name="factor">Function to factor prices by</param>
+        /// <param name="factorFunc">Function to factor prices by</param>
         /// <param name="volumeFactor">Factor to multiply volume/askSize/bidSize/quantity by</param>
+        /// <param name="factor">Price scale</param>
+        /// <param name="sumOfDividends">The current dividend sum</param>
         /// <remarks>Volume values are rounded to the nearest integer, lot size purposefully not considered
         /// as scaling only applies to equities</remarks>
-        public static BaseData Scale(this BaseData data, Func<decimal, decimal> factor, decimal volumeFactor)
+        public static BaseData Scale(this BaseData data, Func<decimal, decimal, decimal, decimal> factorFunc, decimal volumeFactor, decimal factor, decimal sumOfDividends)
         {
             switch (data.DataType)
             {
@@ -3157,10 +3206,10 @@ namespace QuantConnect
                     var tradeBar = data as TradeBar;
                     if (tradeBar != null)
                     {
-                        tradeBar.Open = factor(tradeBar.Open);
-                        tradeBar.High = factor(tradeBar.High);
-                        tradeBar.Low = factor(tradeBar.Low);
-                        tradeBar.Close = factor(tradeBar.Close);
+                        tradeBar.Open = factorFunc(tradeBar.Open, factor, sumOfDividends);
+                        tradeBar.High = factorFunc(tradeBar.High, factor, sumOfDividends);
+                        tradeBar.Low = factorFunc(tradeBar.Low, factor, sumOfDividends);
+                        tradeBar.Close = factorFunc(tradeBar.Close, factor, sumOfDividends);
                         tradeBar.Volume = Math.Round(tradeBar.Volume * volumeFactor);
                     }
                     break;
@@ -3181,14 +3230,14 @@ namespace QuantConnect
 
                     if (tick.TickType == TickType.Trade)
                     {
-                        tick.Value = factor(tick.Value);
+                        tick.Value = factorFunc(tick.Value, factor, sumOfDividends);
                         tick.Quantity = Math.Round(tick.Quantity * volumeFactor);
                         break;
                     }
 
-                    tick.BidPrice = tick.BidPrice != 0 ? factor(tick.BidPrice) : 0;
+                    tick.BidPrice = tick.BidPrice != 0 ? factorFunc(tick.BidPrice, factor, sumOfDividends) : 0;
                     tick.BidSize = Math.Round(tick.BidSize * volumeFactor);
-                    tick.AskPrice = tick.AskPrice != 0 ? factor(tick.AskPrice) : 0;
+                    tick.AskPrice = tick.AskPrice != 0 ? factorFunc(tick.AskPrice, factor, sumOfDividends) : 0;
                     tick.AskSize = Math.Round(tick.AskSize * volumeFactor);
 
                     if (tick.BidPrice == 0)
@@ -3210,17 +3259,17 @@ namespace QuantConnect
                     {
                         if (quoteBar.Ask != null)
                         {
-                            quoteBar.Ask.Open = factor(quoteBar.Ask.Open);
-                            quoteBar.Ask.High = factor(quoteBar.Ask.High);
-                            quoteBar.Ask.Low = factor(quoteBar.Ask.Low);
-                            quoteBar.Ask.Close = factor(quoteBar.Ask.Close);
+                            quoteBar.Ask.Open = factorFunc(quoteBar.Ask.Open, factor, sumOfDividends);
+                            quoteBar.Ask.High = factorFunc(quoteBar.Ask.High, factor, sumOfDividends);
+                            quoteBar.Ask.Low = factorFunc(quoteBar.Ask.Low, factor, sumOfDividends);
+                            quoteBar.Ask.Close = factorFunc(quoteBar.Ask.Close, factor, sumOfDividends);
                         }
                         if (quoteBar.Bid != null)
                         {
-                            quoteBar.Bid.Open = factor(quoteBar.Bid.Open);
-                            quoteBar.Bid.High = factor(quoteBar.Bid.High);
-                            quoteBar.Bid.Low = factor(quoteBar.Bid.Low);
-                            quoteBar.Bid.Close = factor(quoteBar.Bid.Close);
+                            quoteBar.Bid.Open = factorFunc(quoteBar.Bid.Open, factor, sumOfDividends);
+                            quoteBar.Bid.High = factorFunc(quoteBar.Bid.High, factor, sumOfDividends);
+                            quoteBar.Bid.Low = factorFunc(quoteBar.Bid.Low, factor, sumOfDividends);
+                            quoteBar.Bid.Close = factorFunc(quoteBar.Bid.Close, factor, sumOfDividends);
                         }
                         quoteBar.Value = quoteBar.Close;
                         quoteBar.LastAskSize = Math.Round(quoteBar.LastAskSize * volumeFactor);
@@ -3252,21 +3301,39 @@ namespace QuantConnect
             {
                 case DataNormalizationMode.Adjusted:
                 case DataNormalizationMode.SplitAdjusted:
-                    return data?.Scale(p => p * factor, 1/factor);
+                    return data?.Scale(TimesFactor, 1/factor, factor, decimal.Zero);
                 case DataNormalizationMode.TotalReturn:
-                    return data.Scale(p => p * factor + sumOfDividends, 1/factor);
+                    return data.Scale(TimesFactor, 1/factor, factor, sumOfDividends);
 
                 case DataNormalizationMode.BackwardsRatio:
-                    return data.Scale(p => p * factor, 1);
+                    return data.Scale(TimesFactor, 1, factor, decimal.Zero);
                 case DataNormalizationMode.BackwardsPanamaCanal:
-                    return data.Scale(p => p + factor, 1);
+                    return data.Scale(AdditionFactor, 1, factor, decimal.Zero);
                 case DataNormalizationMode.ForwardPanamaCanal:
-                    return data.Scale(p => p + factor, 1);
+                    return data.Scale(AdditionFactor, 1, factor, decimal.Zero);
 
                 case DataNormalizationMode.Raw:
                 default:
                     return data;
             }
+        }
+
+        /// <summary>
+        /// Applies a times factor. We define this so we don't need to create it constantly
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static decimal TimesFactor(decimal target, decimal factor, decimal sumOfDividends)
+        {
+            return target * factor + sumOfDividends;
+        }
+
+        /// <summary>
+        /// Applies an addition factor. We define this so we don't need to create it constantly
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static decimal AdditionFactor(decimal target, decimal factor, decimal _)
+        {
+            return target + factor;
         }
 
         /// <summary>
@@ -3383,6 +3450,29 @@ namespace QuantConnect
         }
 
         /// <summary>
+        /// Helper method to process an algorithms security changes, will add and remove securities according to them
+        /// </summary>
+        public static void ProcessSecurityChanges(this IAlgorithm algorithm, SecurityChanges securityChanges)
+        {
+            foreach (var security in securityChanges.AddedSecurities)
+            {
+                security.IsTradable = true;
+
+                // uses TryAdd, so don't need to worry about duplicates here
+                algorithm.Securities.Add(security);
+            }
+
+            var activeSecurities = algorithm.UniverseManager.ActiveSecurities;
+            foreach (var security in securityChanges.RemovedSecurities)
+            {
+                if (!activeSecurities.ContainsKey(security.Symbol))
+                {
+                    security.IsTradable = false;
+                }
+            }
+        }
+
+        /// <summary>
         /// Helper method to set an algorithm runtime exception in a normalized fashion
         /// </summary>
         public static void SetRuntimeError(this IAlgorithm algorithm, Exception exception, string context)
@@ -3457,7 +3547,7 @@ namespace QuantConnect
             // force option chain security to not be directly tradable AFTER it's configured to ensure it's not overwritten
             optionChain.IsTradable = false;
 
-            return new OptionChainUniverse(optionChain, settings, algorithm.LiveMode);
+            return new OptionChainUniverse(optionChain, settings);
         }
 
         /// <summary>
@@ -3519,7 +3609,7 @@ namespace QuantConnect
         /// <summary>
         /// Centralized logic used at the top of the subscription enumerator stacks to determine if we should emit base data points
         /// based on the configuration for this subscription and the type of data we are handling.
-        /// 
+        ///
         /// Currently we only want to emit split/dividends/delisting events for non internal <see cref="TradeBar"/> configurations
         /// this last part is because equities also have <see cref="QuoteBar"/> subscriptions which will also subscribe to the
         /// same aux events and we don't want duplicate emits of these events in the TimeSliceFactory
@@ -3534,8 +3624,8 @@ namespace QuantConnect
         /// Reference PR #5485 and related issues for more.</remarks>
         public static bool ShouldEmitData(this SubscriptionDataConfig config, BaseData data, bool isUniverse = false)
         {
-            // For now we are only filtering Auxiliary data; so if its another type just return true
-            if (data.DataType != MarketDataType.Auxiliary)
+            // For now we are only filtering Auxiliary data; so if its another type just return true or if it's a margin interest rate which we want to emit always
+            if (data.DataType != MarketDataType.Auxiliary || config.Type == typeof(MarginInterestRate))
             {
                 return true;
             }
@@ -3562,7 +3652,7 @@ namespace QuantConnect
             {
                 return (data as Delisting)?.Type == DelistingType.Delisted;
             }
-            
+
             if (!(type == typeof(Delisting) || type == typeof(Split) || type == typeof(Dividend)))
             {
                 return true;
@@ -3694,6 +3784,49 @@ namespace QuantConnect
                 default:
                     return false;
             }
+        }
+
+        /// <summary>
+        /// Gets the greatest common divisor of a list of numbers
+        /// </summary>
+        /// <param name="values">List of numbers which greatest common divisor is requested</param>
+        /// <returns>The greatest common divisor for the given list of numbers</returns>
+        public static int GreatestCommonDivisor(this IEnumerable<int> values)
+        {
+            int? result = null;
+            foreach (var value in values)
+            {
+                if (result.HasValue)
+                {
+                    result = GreatestCommonDivisor(result.Value, value);
+                }
+                else
+                {
+                    result = value;
+                }
+            }
+
+            if (!result.HasValue)
+            {
+                throw new ArgumentException("The list of values cannot be empty");
+            }
+
+            return result.Value;
+        }
+
+        /// <summary>
+        /// Gets the greatest common divisor of two numbers
+        /// </summary>
+        private static int GreatestCommonDivisor(int a, int b)
+        {
+            int remainder;
+            while (b != 0)
+            {
+                remainder = a % b;
+                a = b;
+                b = remainder;
+            }
+            return Math.Abs(a);
         }
     }
 }

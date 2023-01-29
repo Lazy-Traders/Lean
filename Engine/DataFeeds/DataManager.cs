@@ -21,6 +21,7 @@ using System.Collections.Specialized;
 using System.Linq;
 using QuantConnect.Data;
 using QuantConnect.Data.Auxiliary;
+using QuantConnect.Data.Market;
 using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Interfaces;
 using QuantConnect.Logging;
@@ -355,8 +356,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds
             // the subscription could of ended but might still be part of the universe
             if (subscription.RemovedFromUniverse.Value)
             {
-                SubscriptionDataConfig config;
-                _subscriptionManagerSubscriptions.TryRemove(subscription.Configuration, out config);
+                _subscriptionManagerSubscriptions.TryRemove(subscription.Configuration, out var _);
             }
         }
 
@@ -521,6 +521,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds
         /// <param name="resolution">The resolution of the data requested</param>
         /// <param name="isCanonical">Indicates whether the security is Canonical (future and options)</param>
         /// <returns>Types that should be added to the <see cref="SubscriptionDataConfig" /></returns>
+        /// <remarks>TODO: data type additions are very related to ticktype and should be more generic/independent of each other</remarks>
         public List<Tuple<Type, TickType>> LookupSubscriptionConfigDataTypes(
             SecurityType symbolSecurityType,
             Resolution resolution,
@@ -532,16 +533,18 @@ namespace QuantConnect.Lean.Engine.DataFeeds
                 return new List<Tuple<Type, TickType>> { new Tuple<Type, TickType>(typeof(ZipEntryName), TickType.Quote) };
             }
 
-            IEnumerable<TickType> availableDataType = AvailableDataTypes[symbolSecurityType];
-            // Equities will only look for trades in case of low resolutions.
-            if (symbolSecurityType == SecurityType.Equity && (resolution == Resolution.Daily || resolution == Resolution.Hour))
-            {
-                // we filter out quote tick type
-                availableDataType = availableDataType.Where(t => t != TickType.Quote);
-            }
+            IEnumerable<TickType> availableDataType = AvailableDataTypes[symbolSecurityType]
+                // Equities will only look for trades in case of low resolutions.
+                .Where(tickType => LeanData.IsValidConfiguration(symbolSecurityType, resolution, tickType));
 
-            return availableDataType
+            var result = availableDataType
                 .Select(tickType => new Tuple<Type, TickType>(LeanData.GetDataType(resolution, tickType), tickType)).ToList();
+
+            if(symbolSecurityType == SecurityType.CryptoFuture)
+            {
+                result.Add(new Tuple<Type, TickType>(typeof(MarginInterestRate), TickType.Quote));
+            }
+            return result;
         }
 
         /// <summary>
